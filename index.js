@@ -12,6 +12,21 @@ const STAGE_RE = /^[a-zA-Z0-9_.-]+$/;
 function text(items) { return items.map((x) => ({ type: 'text', text: x })); }
 
 /**
+ * 隔离兜底：包装工具 execute。任何异常在此捕获并记录，再重新抛出，
+ * 由 DSH dispatch 层转成 isError 结果返回给模型 —— 绝不炸穿 harness 进程。
+ */
+function guard(execute, label) {
+  return async (args, exec) => {
+    try {
+      return await execute(args, exec);
+    } catch (error) {
+      console.error('[agent-workflow:' + label + ']', error);
+      throw error;
+    }
+  };
+}
+
+/**
 * 当前会话的工作区根目录：
 * 1) 显式 DSH_PROJECT_ROOT 优先（临时调试用）
 * 2) 工具执行上下文里的 session cwd（多工作区下才是对的）
@@ -72,7 +87,7 @@ const newTicket = defineTool({
     tier: { type: 'string', description: '档位 lite/standard/heavy，默认 lite' }
   },
   output: { schema: { type: 'object', additionalProperties: false, properties: { file: { type: 'string' }, taskId: { type: 'string' } } }, render: (a, v) => text(['已生成 ticket: ' + v.file + '（任务ID ' + v.taskId + '）']) },
-  execute: async (a, exec) => {
+  execute: guard(async (a, exec) => {
     if (!NAME_RE.test(a.name)) throw new Error('无效任务名: 仅允许字母/数字/下划线/连字符');
     const r = rootFor(exec);
     const tier = ['lite', 'standard', 'heavy'].includes(a.tier) ? a.tier : 'lite';
@@ -87,7 +102,7 @@ const newTicket = defineTool({
     const file = join(d, a.name + '.md');
     writeFileSync(file, lines.join('\n'), 'utf8');
     return { file, taskId };
-  }
+  }, 'new_ticket')
 });
 
 // ===== check_report =====
@@ -96,7 +111,7 @@ const checkReport = defineTool({
   description: '校验 .agents/reports/<name>.md 格式；审查报告（文件名 -review 结尾或首行 审查结论:）额外校验首行机器可读结论与双轴。',
   parameters: { name: { type: 'string', required: true, description: '报告名（任务名）' } },
   output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean' }, problems: { type: 'array', items: { type: 'string' } } } }, render: (a, v) => text(v.ok ? ['PASS: ' + a.name] : ['FAIL: ' + a.name + '\n - ' + v.problems.join('\n - ')]) },
-  execute: async (a, exec) => {
+  execute: guard(async (a, exec) => {
     if (!NAME_RE.test(a.name)) throw new Error('无效任务名: 仅允许字母/数字/下划线/连字符');
     const file = join(rootFor(exec), '.agents', 'reports', a.name + '.md');
     if (!existsSync(file)) return { ok: false, problems: ['报告不存在 ' + file] };
@@ -112,7 +127,7 @@ const checkReport = defineTool({
       for (const ax of ['Spec 轴', 'Standards 轴']) if (!t.includes(ax + ':') && !t.includes(ax + '：')) problems.push('缺少双轴结论: ' + ax);
     }
     return { ok: problems.length === 0, problems };
-  }
+  }, 'check_report')
 });
 
 // ===== smoke_test =====
@@ -121,7 +136,7 @@ const smokeTest = defineTool({
   description: '整体冒烟门禁：校验所有报告格式；strict 时要求每个 ticket 有报告且审查结论全 PASS。',
   parameters: { strict: { type: 'boolean', description: '严格模式' } },
   output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean' }, failures: { type: 'array', items: { type: 'string' } } } }, render: (a, v) => text(v.ok ? ['PASS: smoke-test'] : ['FAIL: smoke-test\n - ' + v.failures.join('\n - ')]) },
-  execute: async (a, exec) => {
+  execute: guard(async (a, exec) => {
     const r = rootFor(exec);
     const reportsDir = join(r, '.agents', 'reports');
     const ticketsDir = join(r, '.agents', 'tickets');
@@ -144,7 +159,7 @@ const smokeTest = defineTool({
       }
     }
     return { ok: failures.length === 0, failures };
-  }
+  }, 'smoke_test')
 });
 
 // ===== trace =====
@@ -153,7 +168,7 @@ const trace = defineTool({
   description: '提取子代理 ground-truth 执行轨迹（内置 node:zlib 多帧解压 zstd）。用法 list / session=<id> / latest-subagent。',
   parameters: { mode: { type: 'string', description: 'list | session | latest-subagent' }, sessionId: { type: 'string', description: 'mode=session 时的会话 id' } },
   output: { schema: { type: 'object', additionalProperties: false, properties: { text: { type: 'string' } } }, render: (a, v) => text([v.text]) },
-  execute: async (a) => {
+  execute: guard(async (a) => {
     const home = process.env.DSH_HOME || join(process.env.USERPROFILE || '', '.dsh');
     const env = process.env.DSH_SESSION_JSONL;
     const sessionsDir = env ? resolve(env, '..', '..') : join(home, 'sessions');
@@ -183,7 +198,7 @@ const trace = defineTool({
       else if (e.type === 'assistant/message') { const c = (e.data.message?.content || []).filter((b) => b.type !== 'reasoning').map((b) => b.text).join(' '); if (c) out.push('### 输出\n' + c.slice(0, 300)); }
     }
     return { text: out.join('\n') || '(空)' };
-  }
+  }, 'trace')
 });
 
 // ===== archive =====
@@ -192,7 +207,7 @@ const archive = defineTool({
   description: '归档 .agents/tickets + .agents/reports 到 .agents/archive/<stage>/，写 MANIFEST 保留依赖与结论。',
   parameters: { stage: { type: 'string', description: '阶段名，默认当日日期' } },
   output: { schema: { type: 'object', additionalProperties: false, properties: { moved: { type: 'number' }, manifest: { type: 'string' } } }, render: (a, v) => text(['归档 ' + v.moved + ' 个文件 → ' + v.manifest]) },
-  execute: async (a, exec) => {
+  execute: guard(async (a, exec) => {
     const r = rootFor(exec);
     const stage = a.stage || new Date().toISOString().slice(0, 10);
     if (!STAGE_RE.test(stage)) throw new Error('无效阶段名: 仅允许字母/数字/下划线/点/连字符');
@@ -205,7 +220,7 @@ const archive = defineTool({
     lines.push('## reports'); for (const f of reports) { let t; try { t = readFileSync(join(dest, 'reports', f), 'utf8'); } catch (e) { t = ''; } const first = t.split('\n').map((l) => l.trim()).find((l) => l.length > 0) || ''; lines.push('- ' + f + (first.includes('审查结论') ? ' → ' + first : '')); }
     const manifest = join(dest, 'MANIFEST.md'); writeFileSync(manifest, lines.join('\n'), 'utf8');
     return { moved: tickets.length + reports.length, manifest };
-  }
+  }, 'archive')
 });
 
 // ===== capability_check =====
@@ -236,7 +251,7 @@ const capabilityCheck = defineTool({
   description: '能力预检：扫描任务书+tickets 所需 skill/MCP，核对本地是否齐备，生成 docs/capabilities.md。',
   parameters: { taskbook: { type: 'string', description: '任务书路径，默认 docs/TASKBOOK.md' } },
   output: { schema: { type: 'object', additionalProperties: false, properties: { detected: { type: 'number' }, missing: { type: 'array', items: { type: 'string' } } } }, render: (a, v) => text(['预检: ' + v.detected + ' 项所需，' + v.missing.length + ' 项缺失' + (v.missing.length ? '\n缺失: ' + v.missing.join(', ') : '')]) },
-  execute: async (a, exec) => {
+  execute: guard(async (a, exec) => {
     const r = rootFor(exec);
     const home = process.env.DSH_HOME || join(process.env.USERPROFILE || '', '.dsh');
     const CAPS = [
@@ -263,7 +278,7 @@ const capabilityCheck = defineTool({
     mkdirSync(join(r, 'docs'), { recursive: true });
     writeFileSync(join(r, 'docs', 'capabilities.md'), lines.join('\n'), 'utf8');
     return { detected: detected.length, missing: missing.map((c) => c.desc) };
-  }
+  }, 'capability_check')
 });
 
 // ===== 系统提示 SOP =====
@@ -276,6 +291,10 @@ const SOP = [
 ].join('\n');
 
 export function apply(ctx) {
-  for (const t of [newTicket, checkReport, smokeTest, trace, archive, capabilityCheck]) ctx.tools.register(t);
-  ctx.systemPrompt.section({ name: 'agent-workflow', text: SOP, order: 117 });
+  try {
+    for (const t of [newTicket, checkReport, smokeTest, trace, archive, capabilityCheck]) ctx.tools.register(t);
+    ctx.systemPrompt.section({ name: 'agent-workflow', text: SOP, order: 117 });
+  } catch (error) {
+    console.error('[agent-workflow] apply failed (isolated, harness continues):', error);
+  }
 }
