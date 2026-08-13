@@ -90,6 +90,8 @@ const newTicket = defineTool({
   execute: guard(async (a, exec) => {
     if (!NAME_RE.test(a.name)) throw new Error('无效任务名: 仅允许字母/数字/下划线/连字符');
     const r = rootFor(exec);
+    const taskbook = join(r, 'docs', 'TASKBOOK.md');
+    if (!existsSync(taskbook)) throw new Error('缺少 docs/TASKBOOK.md：请先拷问用户（目标/边界/交付物/验收）并写任务书，再拆票');
     const tier = ['lite', 'standard', 'heavy'].includes(a.tier) ? a.tier : 'lite';
     const stamp = Date.now().toString(36).slice(-6) + Math.random().toString(36).slice(2, 6);
     const taskId = a.name + '_' + stamp;
@@ -141,21 +143,26 @@ const smokeTest = defineTool({
     const reportsDir = join(r, '.agents', 'reports');
     const ticketsDir = join(r, '.agents', 'tickets');
     const failures = [];
-    if (!existsSync(reportsDir)) return { ok: false, failures: ['没有 .agents/reports/'] };
-    const reportFiles = readdirSync(reportsDir).filter((f) => f.endsWith('.md') && f !== 'TEMPLATE.md' && f !== 'README.md');
-    for (const f of reportFiles) {
-      const name = f.slice(0, -3);
-      let t;
-      try { t = readFileSync(join(reportsDir, f), 'utf8'); } catch (e) { failures.push('无法读取报告: ' + f + '（' + e.message + '）'); continue; }
-      const first = t.split('\n').map((l) => l.trim()).find((l) => l.length > 0) || '';
-      const isReview = name.endsWith('-review') || /^审查结论[：:]/.test(first);
-      if (isReview && !/^审查结论[：:]\s*PASS/i.test(first)) failures.push('审查结论未通过: ' + name);
-    }
-    if (a.strict && existsSync(ticketsDir)) {
-      const reportNames = new Set(reportFiles.map((f) => f.slice(0, -3)));
-      for (const f of readdirSync(ticketsDir)) {
-        if (!f.endsWith('.md') || f === 'TEMPLATE.md' || f === 'README.md') continue;
-        if (!reportNames.has(f.slice(0, -3))) failures.push('ticket 无报告: ' + f.slice(0, -3));
+    if (a.strict && !existsSync(join(r, 'docs', 'TASKBOOK.md'))) failures.push('缺少 docs/TASKBOOK.md：未走拷问/任务书步骤');
+    if (!existsSync(reportsDir)) {
+      if (!a.strict) return { ok: false, failures: ['没有 .agents/reports/'] };
+      failures.push('没有 .agents/reports/');
+    } else {
+      const reportFiles = readdirSync(reportsDir).filter((f) => f.endsWith('.md') && f !== 'TEMPLATE.md' && f !== 'README.md');
+      for (const f of reportFiles) {
+        const name = f.slice(0, -3);
+        let t;
+        try { t = readFileSync(join(reportsDir, f), 'utf8'); } catch (e) { failures.push('无法读取报告: ' + f + '（' + e.message + '）'); continue; }
+        const first = t.split('\n').map((l) => l.trim()).find((l) => l.length > 0) || '';
+        const isReview = name.endsWith('-review') || /^审查结论[：:]/.test(first);
+        if (isReview && !/^审查结论[：:]\s*PASS/i.test(first)) failures.push('审查结论未通过: ' + name);
+      }
+      if (a.strict && existsSync(ticketsDir)) {
+        const reportNames = new Set(reportFiles.map((f) => f.slice(0, -3)));
+        for (const f of readdirSync(ticketsDir)) {
+          if (!f.endsWith('.md') || f === 'TEMPLATE.md' || f === 'README.md') continue;
+          if (!reportNames.has(f.slice(0, -3))) failures.push('ticket 无报告: ' + f.slice(0, -3));
+        }
       }
     }
     return { ok: failures.length === 0, failures };
@@ -346,11 +353,11 @@ const capabilityCheck = defineTool({
 
 // ===== 系统提示 SOP =====
 const SOP = [
-  '多代理工程流程（agent-workflow）：主 Agent 拷问拆解，子代理只执行不规划，reviewer 机器可读审查 + 打回循环。',
-  '1. 拷问（grill）目标/边界/交付物/验收 → 2. 任务书 docs/TASKBOOK.md → 3. 能力预检 workflow_capability_check（缺失→市场找→需求规格→阻塞）',
-  '4. 拆票 workflow_new_ticket → 5. 派发 subagent/subagent_fork/workflow（员工 flash/审查 pro）→ 6. 子代理写报告含执行轨迹',
-  '7. 审查：reviewer 双轴 + 首行「审查结论: PASS/FAIL (第N轮)」+ 失败类型(执行偏差/设计偏差) + workflow_trace 交叉核对 + 打回(默认2轮)',
-  '8. 集成 workflow_smoke_test strict → 9. workflow_archive 归档。三档：lite 直行 / standard 加审查 / heavy 完整校验。'
+  '多代理工程流程（agent-workflow）—— 你是「编排者/项目经理」，不是「实现者」。禁止亲自写交付代码；交付物一律通过拆票→派发子代理产出。',
+  '【硬规则】收到任何任务，第一步必须先拷问（grill）目标/边界/交付物/验收，并写成 docs/TASKBOOK.md。TASKBOOK 落盘之前：禁止拆票、禁止派发子代理、禁止直接动手实现。',
+  '（workflow_new_ticket 在缺少 docs/TASKBOOK.md 时会直接拒绝，所以跳过拷问 = 流程走不下去。）',
+  '流程：1. 拷问 + 写 docs/TASKBOOK.md → 2. workflow_capability_check 能力预检 → 3. workflow_new_ticket 拆票 → 4. 派发 subagent/subagent_fork/workflow（员工 flash / 审查 pro）→ 5. 子代理写报告含执行轨迹 → 6. reviewer 双轴审查（首行「审查结论: PASS/FAIL (第N轮)」+ 失败类型 执行偏差/设计偏差）+ workflow_trace 交叉核对 + 打回(默认2轮) → 7. workflow_smoke_test strict → 8. workflow_archive 归档。',
+  '三档：lite 直行 / standard 加审查 / heavy 完整校验。'
 ].join('\n');
 
 export function apply(ctx) {
