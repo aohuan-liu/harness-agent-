@@ -1,0 +1,16 @@
+{
+  "name": "dsh-agent-workflow",
+  "version": "0.1.0",
+  "description": "DSH 多代理工程流程：原生工具（new_ticket/check_report/smoke_test/trace/archive/capability_check）+ 系统提示 SOP",
+  "type": "module",
+  "main": "index.js",
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6"
+  }
+}

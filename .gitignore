@@ -1,0 +1,12 @@
+# DSH 运行时状态
+.dsh-browser/
+.dsh-vision-toolkit/
+.dsh/
+
+# 依赖
+node_modules/
+
+# 系统
+Thumbs.db
+.DS_Store
+*.log

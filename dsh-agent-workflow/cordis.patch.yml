@@ -1,0 +1,5 @@
+# dsh-agent-workflow bundle patch：挂载多代理工程流程插件（原生工具 + 系统提示 SOP）
+- insert:
+    - id: agent-workflow
+      name: dsh-agent-workflow
+      config: {}
