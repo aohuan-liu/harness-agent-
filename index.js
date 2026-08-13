@@ -93,7 +93,7 @@ const newTicket = defineTool({
 // ===== check_report =====
 const checkReport = defineTool({
   name: 'workflow_check_report',
-  description: '校验 .agents/reports/<name>.md 格式；审查报告额外校验首行机器可读结论与双轴。',
+  description: '校验 .agents/reports/<name>.md 格式；审查报告（文件名 -review 结尾或首行 审查结论:）额外校验首行机器可读结论与双轴。',
   parameters: { name: { type: 'string', required: true, description: '报告名（任务名）' } },
   output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean' }, problems: { type: 'array', items: { type: 'string' } } } }, render: (a, v) => text(v.ok ? ['PASS: ' + a.name] : ['FAIL: ' + a.name + '\n - ' + v.problems.join('\n - ')]) },
   execute: async (a, exec) => {
@@ -104,11 +104,11 @@ const checkReport = defineTool({
     try { t = readFileSync(file, 'utf8'); } catch (e) { return { ok: false, problems: ['无法读取报告 ' + file + ': ' + e.message] }; }
     const problems = [];
     const first = t.split('\n').map((l) => l.trim()).find((l) => l.length > 0) || '';
-    const isReview = /^审查结论[：:]/.test(first);
+    const isReview = a.name.endsWith('-review') || /^审查结论[：:]/.test(first);
     if (!isReview) {
       for (const s of ['产出清单', '疑点清单', '合规红旗']) if (!t.includes('## ' + s)) problems.push('缺少章节: ' + s);
     } else {
-      if (!/审查结论[：:]\s*(PASS|FAIL)/i.test(first)) problems.push('审查报告首行必须是 审查结论: PASS/FAIL');
+      if (!/^审查结论[：:]\s*(PASS|FAIL)/i.test(first)) problems.push('审查报告首行必须是 审查结论: PASS/FAIL');
       for (const ax of ['Spec 轴', 'Standards 轴']) if (!t.includes(ax + ':') && !t.includes(ax + '：')) problems.push('缺少双轴结论: ' + ax);
     }
     return { ok: problems.length === 0, problems };
@@ -132,10 +132,9 @@ const smokeTest = defineTool({
       const name = f.slice(0, -3);
       let t;
       try { t = readFileSync(join(reportsDir, f), 'utf8'); } catch (e) { failures.push('无法读取报告: ' + f + '（' + e.message + '）'); continue; }
-      if (t.includes('审查结论')) {
-        const first = t.split('\n').map((l) => l.trim()).find((l) => l.length > 0) || '';
-        if (!/审查结论[：:]\s*PASS/i.test(first)) failures.push('审查结论未通过: ' + name);
-      }
+      const first = t.split('\n').map((l) => l.trim()).find((l) => l.length > 0) || '';
+      const isReview = name.endsWith('-review') || /^审查结论[：:]/.test(first);
+      if (isReview && !/^审查结论[：:]\s*PASS/i.test(first)) failures.push('审查结论未通过: ' + name);
     }
     if (a.strict && existsSync(ticketsDir)) {
       const reportNames = new Set(reportFiles.map((f) => f.slice(0, -3)));
@@ -151,7 +150,7 @@ const smokeTest = defineTool({
 // ===== trace =====
 const trace = defineTool({
   name: 'workflow_trace',
-  description: '提取子代理 ground-truth 执行轨迹（解压 session.jsonl.zstd）。用法 list / session=<id> / latest-subagent。',
+  description: '提取子代理 ground-truth 执行轨迹（内置 node:zlib 多帧解压 zstd）。用法 list / session=<id> / latest-subagent。',
   parameters: { mode: { type: 'string', description: 'list | session | latest-subagent' }, sessionId: { type: 'string', description: 'mode=session 时的会话 id' } },
   output: { schema: { type: 'object', additionalProperties: false, properties: { text: { type: 'string' } } }, render: (a, v) => text([v.text]) },
   execute: async (a) => {
@@ -160,7 +159,7 @@ const trace = defineTool({
     const sessionsDir = env ? resolve(env, '..', '..') : join(home, 'sessions');
     if (!existsSync(sessionsDir)) return { text: 'FAIL: 无法定位 sessions 目录' };
     const z = (f) => decompressZstd(readFileSync(f));
-    const header = (id) => { const p = join(sessionsDir, id, 'session.jsonl.zstd'); if (!existsSync(p)) return null; return JSON.parse(z(p).split('\n')[0]); };
+    const header = (id) => { const p = join(sessionsDir, id, 'session.jsonl.zstd'); if (!existsSync(p)) return null; try { return JSON.parse(z(p).split('\n')[0]); } catch (e) { return null; } };
     if (a.mode === 'list') {
       const rows = [];
       for (const id of readdirSync(sessionsDir)) { const h = header(id); if (h) rows.push('depth=' + (h.delegationDepth ?? 0) + ' ' + id); }
@@ -174,7 +173,9 @@ const trace = defineTool({
     }
     const id = a.sessionId; if (!id) return { text: 'FAIL: 需要 sessionId 或 mode=list' };
     const p = join(sessionsDir, id, 'session.jsonl.zstd'); if (!existsSync(p)) return { text: 'FAIL: 会话不存在 ' + id };
-    const evs = z(p).split('\n').map((l) => { try { return JSON.parse(l); } catch (e) { return null; } }).filter(Boolean).sort((x, y) => (x.seq ?? 0) - (y.seq ?? 0));
+    let raw;
+    try { raw = z(p); } catch (e) { return { text: 'FAIL: 解压失败 ' + id + '（' + e.message + '）' }; }
+    const evs = raw.split('\n').map((l) => { try { return JSON.parse(l); } catch (e) { return null; } }).filter(Boolean).sort((x, y) => (x.seq ?? 0) - (y.seq ?? 0));
     const out = [];
     for (const e of evs) {
       if (e.type === 'step/start') out.push('## turn ' + e.data.turn + ' / step ' + e.data.step);
@@ -200,8 +201,8 @@ const archive = defineTool({
     const tickets = moveDir(join(r, '.agents', 'tickets'), 'tickets');
     const reports = moveDir(join(r, '.agents', 'reports'), 'reports');
     const lines = ['# MANIFEST ' + stage, '', '## tickets'];
-    for (const f of tickets) { const t = readFileSync(join(dest, 'tickets', f), 'utf8'); const m = t.split('\n').find((l) => l.includes('- 依赖')); lines.push('- ' + f + (m ? '（' + m.trim() + '）' : '')); }
-    lines.push('## reports'); for (const f of reports) { const t = readFileSync(join(dest, 'reports', f), 'utf8'); const first = t.split('\n').map((l) => l.trim()).find((l) => l.length > 0) || ''; lines.push('- ' + f + (first.includes('审查结论') ? ' → ' + first : '')); }
+    for (const f of tickets) { let t; try { t = readFileSync(join(dest, 'tickets', f), 'utf8'); } catch (e) { t = ''; } const m = t.split('\n').find((l) => l.includes('- 依赖')); lines.push('- ' + f + (m ? '（' + m.trim() + '）' : '')); }
+    lines.push('## reports'); for (const f of reports) { let t; try { t = readFileSync(join(dest, 'reports', f), 'utf8'); } catch (e) { t = ''; } const first = t.split('\n').map((l) => l.trim()).find((l) => l.length > 0) || ''; lines.push('- ' + f + (first.includes('审查结论') ? ' → ' + first : '')); }
     const manifest = join(dest, 'MANIFEST.md'); writeFileSync(manifest, lines.join('\n'), 'utf8');
     return { moved: tickets.length + reports.length, manifest };
   }
