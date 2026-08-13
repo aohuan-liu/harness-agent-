@@ -1,5 +1,5 @@
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, renameSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, renameSync, statSync } from 'node:fs';
 import { join, resolve, basename } from 'node:path';
 import { zstdDecompressSync } from 'node:zlib';
 
@@ -246,6 +246,69 @@ function scanForSkill(dir, name, depth) {
   return false;
 }
 
+/** 活动面板状态快照：扫描工作区 .agents/tickets + reports + archive。 */
+const WEB_SERVER_KEYS = ['webServer', 'httpServer'];
+const WORKSPACE_KEYS = ['workspaceRegistry', 'workspace'];
+
+function readMaybe(p) {
+  try { return readFileSync(p, 'utf8'); } catch (e) { return null; }
+}
+function firstLine(text) {
+  return (text ?? '').split('\n').map((l) => l.trim()).find((l) => l.length > 0) || '';
+}
+function collectAgentsState(wsPath) {
+  const base = join(wsPath, '.agents');
+  const tickets = [];
+  const reports = [];
+  const archives = [];
+  const tdir = join(base, 'tickets');
+  if (existsSync(tdir)) {
+    let files = [];
+    try { files = readdirSync(tdir); } catch (e) {}
+    for (const f of files) {
+      if (!f.endsWith('.md')) continue;
+      const p = join(tdir, f);
+      const t = readMaybe(p) ?? '';
+      const tierMatch = /- 档位[：:]\s*(\S+)/.exec(t);
+      let mtime = 0;
+      try { mtime = statSync(p).mtimeMs; } catch (e) {}
+      tickets.push({
+        name: f.slice(0, -3),
+        tier: tierMatch ? tierMatch[1] : 'lite',
+        hasReport: existsSync(join(base, 'reports', f)),
+        mtime
+      });
+    }
+  }
+  const rdir = join(base, 'reports');
+  if (existsSync(rdir)) {
+    let files = [];
+    try { files = readdirSync(rdir); } catch (e) {}
+    for (const f of files) {
+      if (!f.endsWith('.md')) continue;
+      const p = join(rdir, f);
+      const first = firstLine(readMaybe(p));
+      const m = /^审查结论[：:]\s*(PASS|FAIL)/i.exec(first);
+      let mtime = 0;
+      try { mtime = statSync(p).mtimeMs; } catch (e) {}
+      reports.push({
+        name: f.slice(0, -3),
+        verdict: m ? m[1].toUpperCase() : (/^审查结论[：:]/.test(first) ? 'INVALID' : 'NONE'),
+        mtime
+      });
+    }
+  }
+  const adir = join(base, 'archive');
+  if (existsSync(adir)) {
+    let stages = [];
+    try { stages = readdirSync(adir); } catch (e) {}
+    for (const stage of stages) {
+      try { if (statSync(join(adir, stage)).isDirectory()) archives.push(stage); } catch (e) {}
+    }
+  }
+  return { tickets, reports, archives };
+}
+
 const capabilityCheck = defineTool({
   name: 'workflow_capability_check',
   description: '能力预检：扫描任务书+tickets 所需 skill/MCP，核对本地是否齐备，生成 docs/capabilities.md。',
@@ -294,6 +357,36 @@ export function apply(ctx) {
   try {
     for (const t of [newTicket, checkReport, smokeTest, trace, archive, capabilityCheck]) ctx.tools.register(t);
     ctx.systemPrompt.section({ name: 'agent-workflow', text: SOP, order: 117 });
+    // 活动面板状态路由（webServer/httpServer 双键兼容，工作区注册后懒挂载）
+    let webRegistered = false;
+    const registerWebSurface = () => {
+      if (webRegistered) return;
+      const webServer = ctx.get(WEB_SERVER_KEYS[0]) ?? ctx.get(WEB_SERVER_KEYS[1]);
+      const workspaceRegistry = ctx.get(WORKSPACE_KEYS[0]) ?? ctx.get(WORKSPACE_KEYS[1]);
+      if (webServer === undefined || workspaceRegistry === undefined) return;
+      webRegistered = true;
+      ctx.effect(() => webServer.register({
+        kind: 'exact',
+        path: '/plugins/dsh-agent-workflow/state',
+        handler: async (req, res) => {
+          const workspaces = workspaceRegistry.list().map((w) => ({
+            title: w.title,
+            path: w.path,
+            ...collectAgentsState(w.path)
+          }));
+          const body = JSON.stringify({ workspaces, updatedAt: Date.now() });
+          res.writeHead(200, {
+            'content-type': 'application/json; charset=utf-8',
+            'cache-control': 'no-store'
+          });
+          res.end(body);
+        }
+      }), 'agent-workflow: state route');
+    };
+    registerWebSurface();
+    ctx.on('internal/service', (name) => {
+      if (WEB_SERVER_KEYS.includes(name) || WORKSPACE_KEYS.includes(name)) registerWebSurface();
+    });
   } catch (error) {
     console.error('[agent-workflow] apply failed (isolated, harness continues):', error);
   }

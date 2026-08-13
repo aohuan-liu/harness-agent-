@@ -2,13 +2,25 @@
 
 DeepSeek Harness（DSH）多代理工程流程插件：把「拷问 → 任务书 → 能力预检 → 拆票 → 派发 → 审查 → 集成 → 归档」工程化为一套**原生工具 + 系统提示 SOP**。
 
-host-only，无 UI，纯 JS（ESM），自带依赖，不依赖任何 symlink / junction。
+纯 JS（ESM），自带依赖，不依赖任何 symlink / junction。带一个右上角**活动面板**（Web GUI 浮层），实时展示各工作区的 tickets / reports / 审查结论 / 归档状态。
 
 ## 一句话
 
 安装后，任何新会话的 agent 会**自动**知道这套多代理流程（系统提示注入 SOP），并用 `workflow_*` 原生工具直接执行各环节——不再需要 skill 加载，也不再需要 `node script.mjs` 手动跑脚本。
 
 ## 提供什么
+
+### 活动面板（Web GUI）
+
+安装并重启后，Web 界面右上角出现工作流状态浮层：
+
+- 1s 轮询 `/plugins/dsh-agent-workflow/state`（host 端按工作区扫描 `.agents/` 磁盘真相）
+- 统计卡：tickets 数 / reports 数 / 审查 PASS / 审查 FAIL
+- tickets 列表：档位徽章 + 是否有报告（✓/✗）
+- reports 列表：首行机器可读结论（PASS / FAIL / 未审查）+ 更新时间
+- 归档阶段展示；无活动时自动收起为小浮标（数量 + 脉冲点）
+
+形态参考 dsh-agent-teams 的右上角浮层（body portal + 轮询），内容按本插件的工程流程域定制。
 
 ### 6 个原生工具
 
